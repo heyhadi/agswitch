@@ -1,0 +1,103 @@
+#!/bin/bash
+# agswitch: switch the Google account used by Antigravity / agy.
+# The login lives in the Keychain item "gemini". Saved (inactive) accounts are kept only in the
+# Keychain as "agswitch:<name>" (never in files) and are deleted after AGSWITCH_DAYS days.
+# Expiry only removes the local copy; it does NOT revoke the token at Google.
+set -euo pipefail
+
+SVC="${AGSWITCH_SVC:-gemini}"
+DIR="${AGSWITCH_DIR:-$HOME/.agswitch}"
+ACCOUNTS_JSON="${AGSWITCH_ACCOUNTS_JSON:-$HOME/.gemini/google_accounts.json}"
+DAYS="${AGSWITCH_DAYS:-30}"
+APPS=(-T /Applications/Antigravity.app -T /Applications/Antigravity.app/Contents/Resources/bin/language_server -T "$HOME/.local/bin/agy" -T /usr/bin/security)
+
+die() { echo "agswitch: $*" >&2; exit 1; }
+mkdir -p "$DIR" && chmod 700 "$DIR"
+
+# Write a secret via stdin of `security -i`, so it never appears in the process list.
+kc_put() { # service account secret
+  local esc; esc=$(printf '%s' "$3" | sed 's/\\/\\\\/g; s/"/\\"/g')
+  security delete-generic-password -s "$1" >/dev/null 2>&1 || true
+  local t args=""; for t in "${APPS[@]}"; do args+=" \"$t\""; done
+  [ "${AGSWITCH_TEST:-}" = 1 ] && args=""
+  printf 'add-generic-password -s "%s" -a "%s"%s -w "%s"\n' "$1" "$2" "$args" "$esc" | security -i >/dev/null
+  [ "$(security find-generic-password -s "$1" -w)" = "$3" ] || die "verifikasi Keychain gagal untuk $1"
+}
+kc_acct() { security find-generic-password -s "$1" 2>/dev/null | sed -n 's/.*"acct"<blob>="\(.*\)"$/\1/p'; }
+
+valid_name() { [[ "$1" =~ ^[a-zA-Z0-9_-]+$ ]] || die "nama akun hanya boleh huruf, angka, - dan _"; }
+
+ensure_closed() {
+  [ "${AGSWITCH_TEST:-}" = 1 ] && return
+  if pgrep -f "Antigravity.app/Contents/MacOS/Antigravity|Contents/Resources/bin/language_server|\.local/bin/agy" >/dev/null; then
+    die "Antigravity/agy masih jalan. Quit dulu (Cmd+Q), lalu ulangi."
+  fi
+}
+
+expire() {
+  local f name age
+  for f in "$DIR"/*.saved; do
+    [ -e "$f" ] || continue
+    name=$(basename "$f" .saved)
+    age=$(( ( $(date +%s) - $(stat -f %m "$f") ) / 86400 ))
+    if [ "$age" -ge "$DAYS" ]; then
+      security delete-generic-password -s "agswitch:$name" >/dev/null 2>&1 || true
+      rm -f "$f" "$DIR/$name.accounts.json"
+      echo "Akun '$name' kedaluwarsa (${age} hari) dan dihapus. Login ulang kalau mau dipakai lagi."
+    fi
+  done
+}
+
+current() { cat "$DIR/current" 2>/dev/null || true; }
+
+# Move the active login into storage under <name>.
+stash() {
+  local name=$1 secret acct
+  secret=$(security find-generic-password -s "$SVC" -w 2>/dev/null) || die "tidak ada login aktif di Keychain ($SVC)"
+  acct=$(kc_acct "$SVC")
+  [ -n "$acct" ] || die "atribut akun di Keychain tidak terbaca"
+  kc_put "agswitch:$name" "$acct" "$secret"
+  [ -f "$ACCOUNTS_JSON" ] && install -m 600 "$ACCOUNTS_JSON" "$DIR/$name.accounts.json"
+  touch "$DIR/$name.saved"
+}
+
+cmd=${1:-list}
+expire
+case "$cmd" in
+  list)
+    cur=$(current); echo "Aktif: ${cur:-(belum dinamai, jalankan: agswitch name <nama>)}"
+    for f in "$DIR"/*.saved; do
+      [ -e "$f" ] || continue
+      n=$(basename "$f" .saved); age=$(( ( $(date +%s) - $(stat -f %m "$f") ) / 86400 ))
+      echo "Tersimpan: $n (kedaluwarsa dalam $(( DAYS - age )) hari)"
+    done ;;
+  name) # name the account that is logged in right now
+    valid_name "${2:-}"; echo "$2" > "$DIR/current"; echo "Login aktif dinamai '$2'." ;;
+  use)
+    target=${2:-}; valid_name "$target"; ensure_closed
+    cur=$(current)
+    [ -n "$cur" ] || die "beri nama login aktif dulu: agswitch name <nama>"
+    [ "$cur" = "$target" ] && { echo "'$target' sudah aktif."; exit 0; }
+    [ -f "$DIR/$target.saved" ] || die "akun '$target' belum tersimpan atau sudah kedaluwarsa"
+    secret=$(security find-generic-password -s "agswitch:$target" -w)
+    acct=$(kc_acct "agswitch:$target")
+    stash "$cur"
+    kc_put "$SVC" "$acct" "$secret"
+    [ -f "$DIR/$target.accounts.json" ] && install -m 600 "$DIR/$target.accounts.json" "$ACCOUNTS_JSON"
+    # Only one copy per account: the active one lives in "$SVC" alone.
+    security delete-generic-password -s "agswitch:$target" >/dev/null 2>&1
+    rm -f "$DIR/$target.saved" "$DIR/$target.accounts.json"
+    echo "$target" > "$DIR/current"
+    echo "Pindah ke '$target'. '$cur' tersimpan ${DAYS} hari. Buka Antigravity lagi." ;;
+  new) # stash the current account so you can log in with another one
+    ensure_closed; cur=$(current)
+    [ -n "$cur" ] || die "beri nama login aktif dulu: agswitch name <nama>"
+    stash "$cur"
+    security delete-generic-password -s "$SVC" >/dev/null 2>&1
+    rm -f "$DIR/current"
+    echo "'$cur' disimpan. Buka Antigravity, login akun lain, lalu: agswitch name <nama>" ;;
+  forget)
+    valid_name "${2:-}"; security delete-generic-password -s "agswitch:$2" >/dev/null 2>&1 || true
+    rm -f "$DIR/$2.saved" "$DIR/$2.accounts.json"; echo "'$2' dihapus." ;;
+  *) echo "Pakai: agswitch [list | name <nama> | new | use <nama> | forget <nama>]"; exit 1 ;;
+esac
