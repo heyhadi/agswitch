@@ -4,15 +4,13 @@ Switch the Google account used by [Antigravity](https://antigravity.google) and 
 
 ```
 $ agswitch list
-Aktif: ag2
-Tersimpan: ag1 (kedaluwarsa dalam 30 hari)
-Tersimpan: ag3 (kedaluwarsa dalam 30 hari)
+Active: ag2
+Saved: ag1 (expires in 30 days)
+Saved: ag3 (expires in 30 days)
 
 $ agswitch use ag1
-Pindah ke 'ag1'. 'ag2' tersimpan 30 hari. Buka Antigravity lagi.
+Switched to 'ag1'. 'ag2' saved for 30 days. Open Antigravity again.
 ```
-
-(Messages are in Bahasa Indonesia.)
 
 ## How it works
 
